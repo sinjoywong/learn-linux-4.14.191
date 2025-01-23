@@ -1258,13 +1258,14 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 	err = -ENODEV;
 	if (!fiq->connected)
 		goto err_unlock;
-
+	// interrupt请求为第一优先级
 	if (!list_empty(&fiq->interrupts)) {
 		req = list_entry(fiq->interrupts.next, struct fuse_req,
 				 intr_entry);
 		return fuse_read_interrupt(fiq, cs, nbytes, req);
 	}
 
+	//处理forget请求:
 	if (forget_pending(fiq)) {
 		if (list_empty(&fiq->pending) || fiq->forget_batch-- > 0)
 			return fuse_read_forget(fc, fiq, cs, nbytes);
@@ -1273,6 +1274,7 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 			fiq->forget_batch = 16;
 	}
 
+	// 从pending队列中取出请求：
 	req = list_entry(fiq->pending.next, struct fuse_req, list);
 	clear_bit(FR_PENDING, &req->flags);
 	list_del_init(&req->list);
@@ -1299,7 +1301,7 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 	spin_lock(&fpq->lock);
 	list_add(&req->list, &fpq->io);
 	spin_unlock(&fpq->lock);
-	// copy req from kernel space to user space:
+	// 将请求拷贝到用户空间（cs在上个调用中初始化）：
 	cs->req = req;
 	err = fuse_copy_one(cs, &in->h, sizeof(in->h));
 	if (!err)
@@ -1320,6 +1322,7 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 		err = reqsize;
 		goto out_end;
 	}
+	//将请求放到 fuse_pqueue->processing队列：
 	list_move_tail(&req->list, &fpq->processing);
 	__fuse_get_request(req);
 	set_bit(FR_SENT, &req->flags);
@@ -1856,6 +1859,7 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 	if (nbytes < sizeof(struct fuse_out_header))
 		return -EINVAL;
 
+	// 将用户空间写数据cs拷贝到oh:
 	err = fuse_copy_one(cs, &oh, sizeof(oh));
 	if (err)
 		goto err_finish;
@@ -1881,7 +1885,7 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 	err = -ENOENT;
 	if (!fpq->connected)
 		goto err_unlock_pq;
-
+	//根据 oh.unique 在 fpq->processing 队列中找到对应的req:
 	req = request_find(fpq, oh.unique);
 	if (!req)
 		goto err_unlock_pq;
@@ -1915,7 +1919,7 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 	cs->req = req;
 	if (!req->out.page_replace)
 		cs->move_pages = 0;
-
+	// 从cs中拷贝参数到req->out:
 	err = copy_out_args(cs, &req->out, nbytes);
 	fuse_copy_finish(cs);
 
